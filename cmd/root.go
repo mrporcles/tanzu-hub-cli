@@ -3,6 +3,9 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 )
+// version is set at build time via -ldflags "-X .../cmd.version=...".
+var version = "dev"
+
 var(
 	username string
 	password string
@@ -14,7 +17,7 @@ var(
 
 var rootCmd = &cobra.Command{
 	Use:   "th",
-	Version: "0.0.1",
+	Version: version,
 	Short: "Tanzu Hub CLI",
 	Long:  `Unofficial CLI for Tanzu Hub `,
 }

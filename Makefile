@@ -1,7 +1,8 @@
 NAME ?= th
 OUTPUT = ./dist/$(NAME)
 GO_SOURCES = $(shell find . -type f -name '*.go')
-VERSION ?= 0.0.1
+VERSION ?= $(or $(shell git describe --tags --abbrev=0 2>/dev/null | sed "s/^v//"),dev)
+LDFLAGS_VERSION = -X github.com/laidbackware/tanzu-hub-cli/cmd.version=$(VERSION)
 
 .PHONY: all
 all: build lint test ## Runs build, lint and test
@@ -17,7 +18,7 @@ $(OUTPUT): $(GO_SOURCES)
 .PHONY: build
 build: $(OUTPUT) ## Build the main binary
 	@echo "Building $(VERSION)"
-	go build -o ./bin/$(NAME) .
+	go build -ldflags "$(LDFLAGS_VERSION)" -o ./bin/$(NAME) .
 
 .PHONY: test
 test: ## Run the unit tests
