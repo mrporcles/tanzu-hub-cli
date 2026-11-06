@@ -91,28 +91,7 @@ func (g *GraphQLClient) mutateSelfManagedCollector(ctx context.Context, collecto
 		"foundationName": r.ManagementEndpoint.EndpointName,
 	}
 
-	allowedFields := make(map[string]struct{}, len(attachmentReturnFields))
-	for _, f := range attachmentReturnFields {
-		allowedFields[f] = struct{}{}
-	}
-
-	for _, prop := range r.DeploymentProperties {
-		if _, allowed := allowedFields[prop.Name]; !allowed {
-			continue
-		}
-		if s, ok := prop.Value.(string); ok {
-			// rename to make human readable
-			if prop.Name == "lemans-gateway-base-url" {
-				result["ingestion_url"] = s
-				continue
-			}
-			if prop.Name == "cluster-cloud-account-id" {
-				result["foundation-id"] = s
-				continue
-			}
-			result[prop.Name] = s
-		}
-	}
+	addDeploymentProperties(result, r.DeploymentProperties)
 
 	return result, nil
 }
@@ -142,25 +121,29 @@ func (g *GraphQLClient) UpdateSelfManagedCollector(ctx context.Context, collecto
 	return g.mutateSelfManagedCollector(ctx, collectorName, collectorType)
 }
 
+// DeleteFoundationByName detaches the collector for the foundation with the
+// given name. The name is matched against the foundation name shown by
+// `foundation list`, or the collector name (the two are the same for foundations
+// attached with the legacy flow).
 func (g *GraphQLClient) DeleteFoundationByName(ctx context.Context, name string) error {
-	var lookupQuery struct {
-		ManagementEndpointQuery struct {
-			QueryManagementEndpointCollectors struct {
-				ManagementEndpointCollectors []struct {
-					ID graphql.ID `graphql:"id"`
-				} `graphql:"managementEndpointCollectors"`
-			} `graphql:"queryManagementEndpointCollectors(name: $name)"`
-		} `graphql:"managementEndpointQuery"`
-	}
-
-	if err := g.Client.Query(ctx, &lookupQuery, map[string]any{"name": []string{name}}); err != nil {
+	collectors, err := g.QueryManagementEndpoints(ctx)
+	if err != nil {
 		return err
 	}
 
-	endpoints := lookupQuery.ManagementEndpointQuery.QueryManagementEndpointCollectors.ManagementEndpointCollectors
-	if len(endpoints) == 0 {
+	var matches []ManagementEndpointCollector
+	for _, c := range collectors {
+		if c.ManagementEndpoint.EndpointName == name || c.Name == name {
+			matches = append(matches, c)
+		}
+	}
+	if len(matches) == 0 {
 		return fmt.Errorf("no foundation found with name %q", name)
 	}
+	if len(matches) > 1 {
+		return fmt.Errorf("%d foundations found with name %q", len(matches), name)
+	}
+	endpoints := matches
 
 	var deleteMutation struct {
 		ManagementEndpointMutation struct {
@@ -170,7 +153,7 @@ func (g *GraphQLClient) DeleteFoundationByName(ctx context.Context, name string)
 		} `graphql:"managementEndpointMutation"`
 	}
 
-	if err := g.Client.Mutate(ctx, &deleteMutation, map[string]any{"id": endpoints[0].ID}); err != nil {
+	if err := g.Client.Mutate(ctx, &deleteMutation, map[string]any{"id": graphql.ID(endpoints[0].ID)}); err != nil {
 		return err
 	}
 
@@ -193,3 +176,28 @@ func (g *GraphQLClient) QueryManagementEndpoints(ctx context.Context) ([]Managem
 	return query.ManagementEndpointQuery.QueryManagementEndpointCollectors.ManagementEndpointCollectors, nil
 }
 
+
+// addDeploymentProperties copies the allowed deployment properties into result,
+// renaming some to be more human readable.
+func addDeploymentProperties(result map[string]string, props []ManagementEndpointCollectorDeploymentProperty) {
+	allowedFields := make(map[string]struct{}, len(attachmentReturnFields))
+	for _, f := range attachmentReturnFields {
+		allowedFields[f] = struct{}{}
+	}
+
+	for _, prop := range props {
+		if _, allowed := allowedFields[prop.Name]; !allowed {
+			continue
+		}
+		if s, ok := prop.Value.(string); ok {
+			switch prop.Name {
+			case "lemans-gateway-base-url":
+				result["ingestion_url"] = s
+			case "cluster-cloud-account-id":
+				result["foundation-id"] = s
+			default:
+				result[prop.Name] = s
+			}
+		}
+	}
+}

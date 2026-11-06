@@ -18,6 +18,10 @@ var (
 	collectorName  string
 	foundationID   string
 	foundationName string
+	regionName      string
+	regionID        string
+	attachRegion    string
+	legacyAttach   bool
 	outputFormat   string
 )
 
@@ -177,8 +181,20 @@ var attachManualCmd = &cobra.Command{
 	Use:   "manual",
 	Short: "Attach a self-managed collector to a foundation in Tanzu Hub",
 	Run: func(cmd *cobra.Command, args []string) {
+		if legacyAttach {
+			runSelfManagedCollectorCmd(cmd, func(gql *api.GraphQLClient) selfManagedCollectorFn {
+				return gql.AttachSelfManagedCollector
+			})
+			return
+		}
+		if attachRegion == "" {
+			fmt.Fprintln(os.Stderr, "--region is required unless --legacy is set")
+			os.Exit(1)
+		}
 		runSelfManagedCollectorCmd(cmd, func(gql *api.GraphQLClient) selfManagedCollectorFn {
-			return gql.AttachSelfManagedCollector
+			return func(ctx context.Context, collectorName, _, _ string) (map[string]string, error) {
+				return gql.AttachFoundationInRegion(ctx, collectorName, attachRegion)
+			}
 		})
 	},
 }
@@ -223,8 +239,139 @@ var deleteFoundationCmd = &cobra.Command{
 	},
 }
 
+var regionCmd = &cobra.Command{
+	Use:     "region",
+	Short:   "Manage regions",
+}
+
+var createRegionCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a region",
+	Run: func(cmd *cobra.Command, args []string) {
+		validateCredentials(cmd)
+
+		client, err := api.GetAccessToken(username, password, hub_url, skipTls, debug)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to authenticate: %s\n", err)
+			os.Exit(1)
+		}
+
+		gql := api.NewGraphQLClient(client, hub_url, skipTls)
+		id, err := gql.CreateRegion(context.Background(), regionName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create region: %s\n", err)
+			os.Exit(1)
+		}
+
+		if outputFormat != "text" {
+			printOutput(outputFormat, map[string]string{"id": id, "name": regionName})
+			return
+		}
+		fmt.Printf("Region %q created with ID %s\n", regionName, id)
+	},
+}
+
+var listRegionsCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List regions and their foundations",
+	Run: func(cmd *cobra.Command, args []string) {
+		validateCredentials(cmd)
+
+		client, err := api.GetAccessToken(username, password, hub_url, skipTls, debug)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to authenticate: %s\n", err)
+			os.Exit(1)
+		}
+
+		gql := api.NewGraphQLClient(client, hub_url, skipTls)
+		groups, err := gql.QueryRegions(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to query regions: %s\n", err)
+			os.Exit(1)
+		}
+
+		if outputFormat != "text" {
+			printOutput(outputFormat, groups)
+			return
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+		fmt.Fprintln(w, "NAME\tID\tFOUNDATIONS")
+		for _, g := range groups {
+			names := make([]string, 0, len(g.Foundations))
+			for _, f := range g.Foundations {
+				names = append(names, f.EntityName)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\n", g.EntityName, g.EntityID, strings.Join(names, ","))
+		}
+		if err := w.Flush(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to flush buffer: %s\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
+var deleteRegionCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Delete a region by name or ID",
+	Run: func(cmd *cobra.Command, args []string) {
+		validateCredentials(cmd)
+
+		client, err := api.GetAccessToken(username, password, hub_url, skipTls, debug)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to authenticate: %s\n", err)
+			os.Exit(1)
+		}
+		gql := api.NewGraphQLClient(client, hub_url, skipTls)
+
+		region, err := gql.FindRegion(context.Background(), regionName, regionID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to find region: %s\n", err)
+			os.Exit(1)
+		}
+		id, label := region.EntityID, region.EntityName
+
+		if len(region.Foundations) > 0 {
+			names := make([]string, 0, len(region.Foundations))
+			for _, f := range region.Foundations {
+				names = append(names, f.EntityName)
+			}
+			fmt.Fprintf(os.Stderr, "Cannot delete region %q: it still has %d foundation(s) attached: %s\n",
+				label, len(names), strings.Join(names, ", "))
+			fmt.Fprintln(os.Stderr, "Delete or move the foundations first.")
+			os.Exit(1)
+		}
+
+		fmt.Printf("Are you sure you want to delete region %q? [y/N]: ", label)
+		var response string
+		fmt.Fscan(os.Stdin, &response)
+		if !strings.EqualFold(response, "y") && !strings.EqualFold(response, "yes") {
+			fmt.Println("Aborted.")
+			return
+		}
+
+		if err := gql.DeleteRegion(context.Background(), id); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to delete region: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Region %q deleted successfully\n", label)
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(foundationCmd)
+	rootCmd.AddCommand(regionCmd)
+	regionCmd.AddCommand(createRegionCmd)
+	regionCmd.AddCommand(listRegionsCmd)
+	regionCmd.AddCommand(deleteRegionCmd)
+	deleteRegionCmd.Flags().StringVarP(&regionName, "name", "", "", "Name of the region to delete")
+	deleteRegionCmd.Flags().StringVarP(&regionID, "id", "", "", "ID of the region to delete")
+	deleteRegionCmd.MarkFlagsOneRequired("name", "id")
+	deleteRegionCmd.MarkFlagsMutuallyExclusive("name", "id")
+	createRegionCmd.Flags().StringVarP(&regionName, "name", "", "", "Name of the region")
+	createRegionCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text, json, yaml")
+	_ = createRegionCmd.MarkFlagRequired("name")
+	listRegionsCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text, json, yaml")
 	foundationCmd.AddCommand(listFoundationsCmd)
 	foundationCmd.AddCommand(attachCmd)
 	foundationCmd.AddCommand(deleteFoundationCmd)
@@ -233,6 +380,8 @@ func init() {
 	listFoundationsCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text, json, yaml")
 	attachManualCmd.Flags().StringVarP(&collectorName, "name", "", "", "Name for the collector")
 	attachManualCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text, json, yaml")
+	attachManualCmd.Flags().StringVarP(&attachRegion, "region", "", "", "Name of the region to create the foundation in")
+	attachManualCmd.Flags().BoolVarP(&legacyAttach, "legacy", "", false, "Use the legacy attach behavior, which does not use a region")
 	_ = attachManualCmd.MarkFlagRequired("name")
 	updateManualCmd.Flags().StringVarP(&collectorName, "name", "", "", "Name for the collector")
 	updateManualCmd.Flags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text, json, yaml")
