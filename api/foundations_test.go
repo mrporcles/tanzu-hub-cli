@@ -117,8 +117,8 @@ func TestDeleteFoundationByName_Success(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		callCount++
 		if callCount == 1 {
-			// First call: lookup by name
-			_, _ = w.Write([]byte(`{"data":{"managementEndpointQuery":{"queryManagementEndpointCollectors":{"managementEndpointCollectors":[{"id":"me-abc"}]}}}}`))
+			// First call: list foundations; the collector name differs from the foundation name
+			_, _ = w.Write([]byte(`{"data":{"managementEndpointQuery":{"queryManagementEndpointCollectors":{"managementEndpointCollectors":[{"id":"me-abc","name":"generated-name","managementEndpoint":{"endpointName":"my-foundation"}}]}}}}`))
 		} else {
 			// Second call: detach by id
 			_, _ = w.Write([]byte(`{"data":{"managementEndpointMutation":{"detachManagementEndpointCollector":{"id":"me-abc"}}}}`))
@@ -230,4 +230,24 @@ func TestAttachSelfManagedCollector_AlreadyExists(t *testing.T) {
 	gql := NewGraphQLClient(client, server.URL, true)
 	_, err = gql.AttachSelfManagedCollector(context.Background(), "my-new-collector", "Kubernetes", "foundation-abc")
 	assert.ErrorContains(t, err, "already exists")
+}
+
+func TestDeleteFoundationByName_Ambiguous(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == TokenEndpoint {
+			mockAuthEndpoint(w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"managementEndpointQuery":{"queryManagementEndpointCollectors":{"managementEndpointCollectors":[
+			{"id":"a","name":"x","managementEndpoint":{"endpointName":"dup"}},
+			{"id":"b","name":"y","managementEndpoint":{"endpointName":"dup"}}]}}}}`))
+	}))
+	defer server.Close()
+
+	client, err := GetAccessToken("user", "pass", server.URL, true)
+	require.NoError(t, err)
+
+	err = NewGraphQLClient(client, server.URL, true).DeleteFoundationByName(context.Background(), "dup")
+	require.ErrorContains(t, err, "2 foundations found")
 }
