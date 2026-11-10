@@ -1,6 +1,10 @@
 package api
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 type LicenseAttribute struct {
 	Name  string
@@ -33,9 +37,9 @@ func (g *GraphQLClient) QueryLicenses(ctx context.Context) ([]License, error) {
 }
 
 type LicenseAddResult struct {
-	Success            bool    `graphql:"success"`
-	VerificationFailure string `graphql:"verificationFailure"`
-	License            *License `graphql:"license"`
+	Success             bool     `graphql:"success"`
+	VerificationFailure string   `graphql:"verificationFailure"`
+	License             *License `graphql:"license"`
 }
 
 func (g *GraphQLClient) AddLicense(ctx context.Context, licenseKey string) (*LicenseAddResult, error) {
@@ -86,6 +90,85 @@ type LicenseApplicationFoundationWorkflow struct {
 
 type LicenseApplyResult struct {
 	LicenseApplicationResults []LicenseApplicationFoundationWorkflow `graphql:"licenseApplicationResults"`
+}
+
+// FoundationEntity is a foundation as known to Hub's entity graph.
+type FoundationEntity struct {
+	EntityID           string `graphql:"entityId"`
+	EntityName         string `graphql:"entityName"`
+	ManagementEndpoint struct {
+		ManagementEndpointID string `graphql:"managementEndpointId"`
+		EndpointName         string `graphql:"endpointName"`
+	} `graphql:"managementEndpoint"`
+}
+
+// QueryFoundationEntities lists the foundation entities known to Hub.
+func (g *GraphQLClient) QueryFoundationEntities(ctx context.Context) ([]FoundationEntity, error) {
+	var query struct {
+		EntityQuery struct {
+			QueryEntities struct {
+				Entities []FoundationEntity `graphql:"entities"`
+			} `graphql:"queryEntities(entityType: \"Tanzu.TAS.Foundation\", first: 1000)"`
+		} `graphql:"entityQuery"`
+	}
+
+	if err := g.Client.Query(ctx, &query, nil); err != nil {
+		return nil, err
+	}
+	return query.EntityQuery.QueryEntities.Entities, nil
+}
+
+// ResolveFoundationEntityIDs converts user supplied foundations into the
+// foundation entity IDs (VRNs) Hub expects when applying a license. Each value
+// may be a full entity ID (passed through unchanged), the ID shown by
+// "foundation list" (the foundation's management endpoint ID), or a foundation
+// name.
+func (g *GraphQLClient) ResolveFoundationEntityIDs(ctx context.Context, ids []string) ([]string, error) {
+	var foundations []FoundationEntity
+	fetched := false
+	resolved := make([]string, len(ids))
+	for i, id := range ids {
+		if strings.HasPrefix(id, "vrn/") {
+			resolved[i] = id
+			continue
+		}
+		if !fetched {
+			var err error
+			if foundations, err = g.QueryFoundationEntities(ctx); err != nil {
+				return nil, err
+			}
+			fetched = true
+		}
+		entityID, err := matchFoundation(foundations, id)
+		if err != nil {
+			return nil, err
+		}
+		resolved[i] = entityID
+	}
+	return resolved, nil
+}
+
+func matchFoundation(foundations []FoundationEntity, id string) (string, error) {
+	var matches []string
+	for _, f := range foundations {
+		if f.EntityName == id || f.EntityID == id ||
+			f.ManagementEndpoint.ManagementEndpointID == id || f.ManagementEndpoint.EndpointName == id {
+			matches = append(matches, f.EntityID)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		known := make([]string, len(foundations))
+		for i, f := range foundations {
+			known[i] = fmt.Sprintf("%s (%s)", f.EntityName, f.EntityID)
+		}
+		return "", fmt.Errorf("no foundation found matching %q; use the ID or name from 'foundation list', or a full entity ID. Known foundations: %s",
+			id, strings.Join(known, ", "))
+	default:
+		return "", fmt.Errorf("%d foundations match %q; use the full entity ID", len(matches), id)
+	}
 }
 
 func (g *GraphQLClient) ApplyLicenseToFoundations(ctx context.Context, licenseID string, foundationIDs []string) (*LicenseApplyResult, error) {

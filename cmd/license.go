@@ -145,6 +145,11 @@ var applyLicenseCmd = &cobra.Command{
 		}
 
 		gql := api.NewGraphQLClient(client, hub_url, skipTls)
+		ids, err = gql.ResolveFoundationEntityIDs(context.Background(), ids)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to resolve foundations: %s\n", err)
+			os.Exit(1)
+		}
 		result, err := gql.ApplyLicenseToFoundations(context.Background(), licenseID, ids)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to apply license: %s\n", err)

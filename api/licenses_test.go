@@ -235,3 +235,47 @@ func TestAddLicense_Failure(t *testing.T) {
 	assert.False(t, result.Success)
 	assert.Equal(t, "LICENSE_KEY_ERROR", result.VerificationFailure)
 }
+
+const mockFoundationEntitiesResponse = `{
+	"data": {
+		"entityQuery": {
+			"queryEntities": {
+				"entities": [
+					{"entityId": "vrn/provider:TAS/instance:p-bosh-abc/Foundation:p-bosh-abc", "entityName": "prod-tas", "managementEndpoint": {"managementEndpointId": "aaaa-bbbb", "endpointName": "prod-collector"}},
+					{"entityId": "vrn/provider:TAS/instance:1111-2222/Foundation:1111-2222", "entityName": "dev-tas", "managementEndpoint": {"managementEndpointId": "1111-2222", "endpointName": "dev-collector"}}
+				]
+			}
+		}
+	}
+}`
+
+func TestResolveFoundationEntityIDs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == TokenEndpoint {
+			mockAuthEndpoint(w)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(mockFoundationEntitiesResponse))
+	}))
+	defer server.Close()
+
+	client, err := GetAccessToken("user", "pass", server.URL, true)
+	require.NoError(t, err, "Failed to get access token")
+	gql := NewGraphQLClient(client, server.URL, true)
+
+	ids, err := gql.ResolveFoundationEntityIDs(context.Background(),
+		[]string{"prod-tas", "1111-2222", "aaaa-bbbb", "vrn/provider:TAS/instance:x/Foundation:x"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"vrn/provider:TAS/instance:p-bosh-abc/Foundation:p-bosh-abc",
+		"vrn/provider:TAS/instance:1111-2222/Foundation:1111-2222",
+		"vrn/provider:TAS/instance:p-bosh-abc/Foundation:p-bosh-abc",
+		"vrn/provider:TAS/instance:x/Foundation:x",
+	}, ids)
+
+	_, err = gql.ResolveFoundationEntityIDs(context.Background(), []string{"missing"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prod-tas")
+}
